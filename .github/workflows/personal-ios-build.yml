@@ -1,0 +1,85 @@
+name: Personal iOS build (unsigned)
+
+# Builds an unsigned Runner.ipa for sideloading with Sideloadly.
+# Needs no secrets: signing happens later in Sideloadly with your own Apple account.
+# Mirrors the build-sign-ios job in build-mobile.yml, minus signing and Fastlane.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios-unsigned:
+    name: Build unsigned iOS IPA
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same action and pinned mise version that immich-app/devtools' use-mise wraps,
+      # fed the workflow's own GITHUB_TOKEN instead of Immich's GitHub App token.
+      - name: Setup Mise
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          github_token: ${{ github.token }}
+          working_directory: ./mobile
+          install_args: '--locked'
+          version: 2026.7.12
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@984c0c890880bbf811283d6f09c4607c62d210a4 # v1.323.0
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./mobile/ios
+
+      - name: Install dependencies
+        run: mise //mobile:install:ci
+
+      - name: Perform codegen
+        run: mise //mobile:codegen
+
+      - name: Resolve iOS Swift Packages
+        working-directory: ./mobile
+        run: flutter build ios --config-only --no-codesign
+
+      - name: Build iOS app (unsigned)
+        working-directory: ./mobile
+        run: flutter build ios --release --no-codesign
+
+      - name: Package IPA
+        working-directory: ./mobile/build/ios/iphoneos
+        run: |
+          ls -la
+          # The app's product name is set by the Xcode project, so don't assume Runner.app
+          apps=(*.app)
+          if [[ ${#apps[@]} -ne 1 || ! -d "${apps[0]}" ]]; then
+            echo "Expected exactly one .app bundle, found: ${apps[*]}"
+            exit 1
+          fi
+          app="${apps[0]}"
+          echo "Packaging $app"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist"
+          ls "$app/PlugIns" || echo "No PlugIns directory"
+          rm -rf Payload Immich-smooth-scrubber.ipa
+          mkdir Payload
+          cp -R "$app" Payload/
+          zip -qry Immich-smooth-scrubber.ipa Payload
+          ls -la Immich-smooth-scrubber.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: immich-smooth-scrubber-ipa
+          path: mobile/build/ios/iphoneos/Immich-smooth-scrubber.ipa
+          if-no-files-found: error
